@@ -19,6 +19,19 @@ Connect Blender, CSM.ai and LLMs via the Model Context Protocol (MCP). This inte
 
 https://github.com/user-attachments/assets/496c2c69-4779-4569-9be0-80b767702c4c
 
+## Compatibility
+
+- Python 3.10+, MCP Python SDK `>=1.3,<3` (both the 1.x `FastMCP` and 2.x `MCPServer` APIs are supported).
+- Any MCP client that can launch a stdio server (Claude Code / Desktop, Cursor, ...). `.mcp.json` is picked up automatically by Claude Code.
+- Smoke test (no Blender needed, uses a fake addon socket): `python tests/test_e2e.py`
+
+## Using with 3DJ and SketchMonkey
+
+Run the `blender` server alongside the 3DJ and SketchMonkey MCP servers in the same client:
+
+- **3DJ → Blender**: `cad_export_model` (format `glb` or `stl`), `get_model_download_url`, or a `generate_from_text` result gives an HTTPS link. Pass it to `import_model_from_url`. (STEP is not importable by Blender; export GLB/STL.)
+- **Blender → SketchMonkey/3DJ**: use `compose_design_brief` / `render_concept` for renders, or export from Blender and import into 3DJ via `cad_import_model`.
+
 ## Overview
 
 BlenderMCP creates a bridge between Blender, CSM.ai and language models, allowing for powerful AI-assisted 3D modeling workflows.

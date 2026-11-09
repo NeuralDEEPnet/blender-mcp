@@ -891,7 +891,15 @@ class BlenderMCPServer:
             elif file_ext == '.fbx':
                 bpy.ops.import_scene.fbx(filepath=filepath)
             elif file_ext == '.obj':
-                bpy.ops.import_scene.obj(filepath=filepath)
+                if hasattr(bpy.ops.wm, "obj_import"):  # Blender 3.2+
+                    bpy.ops.wm.obj_import(filepath=filepath)
+                else:
+                    bpy.ops.import_scene.obj(filepath=filepath)
+            elif file_ext == '.stl':
+                if hasattr(bpy.ops.wm, "stl_import"):  # Blender 4.0+
+                    bpy.ops.wm.stl_import(filepath=filepath)
+                else:
+                    bpy.ops.import_mesh.stl(filepath=filepath)
             elif file_ext == '.blend':
                 # For blend files, we need to append or link
                 with bpy.data.libraries.load(filepath, link=False) as (data_from, data_to):

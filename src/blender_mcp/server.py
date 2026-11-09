@@ -1,5 +1,8 @@
 # blender_mcp_server.py
-from mcp.server.fastmcp import FastMCP, Context, Image
+try:  # MCP Python SDK >= 2.0 renamed FastMCP to MCPServer
+    from mcp.server.mcpserver import MCPServer as FastMCP, Context, Image
+except ImportError:  # MCP Python SDK 1.x
+    from mcp.server.fastmcp import FastMCP, Context, Image
 import socket
 import json
 import asyncio
@@ -193,7 +196,7 @@ async def server_lifespan(server: FastMCP) -> AsyncIterator[Dict[str, Any]]:
 # Create the MCP server with lifespan support
 mcp = FastMCP(
     "BlenderMCP",
-    description="Blender integration through the Model Context Protocol",
+    instructions="Blender integration through the Model Context Protocol",
     lifespan=server_lifespan
 )
 
@@ -967,6 +970,56 @@ def asset_creation_strategy() -> str:
     """
 
 @mcp.tool()
+def import_model_from_url(ctx: Context, url: str, name: str = None) -> str:
+    """
+    Download a 3D model from an HTTPS URL and import it into the Blender scene.
+
+    Works with any provider that returns a download link, e.g. 3DJ
+    (`cad_export_model` with format glb/stl, `get_model_download_url`,
+    `generate_from_text` results) or CSM.ai. Supported formats: GLB/GLTF, STL,
+    OBJ, FBX. STEP is not importable by Blender - export GLB or STL instead.
+
+    Parameters:
+    - url: Public HTTPS URL of the model file
+    - name: Optional name for the imported object
+    """
+    import tempfile
+    from urllib.parse import urlparse
+
+    max_bytes = 200 * 1024 * 1024
+    allowed = {".glb", ".gltf", ".stl", ".obj", ".fbx"}
+    try:
+        parsed = urlparse(url)
+        if parsed.scheme != "https":
+            return json.dumps({"status": "error", "message": "Only https:// URLs are supported"}, indent=2)
+        ext = os.path.splitext(parsed.path)[1].lower()
+        with requests.get(url, stream=True, timeout=60) as resp:
+            resp.raise_for_status()
+            if ext not in allowed:
+                ctype = resp.headers.get("Content-Type", "").lower()
+                ext = {"model/gltf-binary": ".glb", "model/stl": ".stl", "model/obj": ".obj"}.get(ctype.split(";")[0], ext)
+            if ext not in allowed:
+                return json.dumps({
+                    "status": "error",
+                    "message": f"Unsupported or unknown file type '{ext}'. Supported: {sorted(allowed)}"
+                }, indent=2)
+            fd, path = tempfile.mkstemp(suffix=ext, prefix="blender_mcp_")
+            size = 0
+            with os.fdopen(fd, "wb") as f:
+                for chunk in resp.iter_content(chunk_size=1 << 20):
+                    size += len(chunk)
+                    if size > max_bytes:
+                        raise ValueError("Model file exceeds 200 MB limit")
+                    f.write(chunk)
+        blender = get_blender_connection()
+        result = blender.send_command("import_file", {"filepath": path, "name": name})
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error importing model from URL: {str(e)}")
+        return json.dumps({"status": "error", "message": f"Error importing model from URL: {str(e)}"}, indent=2)
+
+
+@mcp.tool()
 def get_csm_status(ctx: Context) -> str:
     """
     Check if CSM.ai integration is enabled in Blender.
@@ -1076,17 +1129,17 @@ def import_csm_model(ctx: Context, model_id: str, mesh_url_glb: str, name: str =
             # If we get here, the result wasn't successful, log it
             logger.warning(f"Blender addon CSM import failed: {result}")
             
-            # Fall back to direct method
-            logger.info("Falling back to direct CSM.ai import method")
-            return direct_import_csm_model(ctx, model_id, mesh_url_glb, name)
-            
+            return json.dumps({
+                "status": "error",
+                "message": f"Blender addon could not import the CSM model: {result}"
+            }, indent=2)
+
         except Exception as addon_error:
-            # Log the error
             logger.error(f"Error using Blender addon for CSM import: {str(addon_error)}")
-            
-            # Fall back to direct method
-            logger.info("Falling back to direct CSM.ai import method")
-            return direct_import_csm_model(ctx, model_id, mesh_url_glb, name)
+            return json.dumps({
+                "status": "error",
+                "message": f"Error importing CSM model via Blender addon: {str(addon_error)}"
+            }, indent=2)
             
     except Exception as e:
         logger.error(f"All CSM import methods failed: {str(e)}")
