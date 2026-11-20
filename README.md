@@ -43,7 +43,7 @@ Run the `blender` server alongside the 3DJ and SketchMonkey MCP servers in the s
 
 | Direction | Tool | What it does |
 | --- | --- | --- |
-| 3DJ → Blender | `import_model_from_url` | Imports a GLB / STL / OBJ / FBX link from `cad_export_model`, `get_model_download_url` or a generation result. STEP is not importable by Blender; export GLB or STL. STL carries no units: pass `scale=0.001` for a part modelled in millimetres. |
+| 3DJ → Blender | `import_model_from_url` | Imports a GLB / STL / OBJ / FBX link from `cad_export_model`, `get_model_download_url` or a generation result. STEP is not importable by Blender; export GLB or STL. 3DJ's GLB is already in metres (an 80 mm part arrives at 0.08 m), so it needs no scale. STL carries no units: pass `scale=0.001` for a part modelled in millimetres. |
 | SketchMonkey → Blender | `apply_image_texture` | Puts an image link (a `render_concept` result, any PNG / JPG / WebP) on a mesh as its base colour. Meshes without UVs, such as CAD imports, get a box projection. |
 | Blender → SketchMonkey | `render_scene` | Renders through the active camera and returns the image, e.g. as a reference for `upload_reference_image` / `render_concept`. |
 | Blender → 3DJ | `export_model` | Writes GLB / STL / OBJ / FBX for the scene or named objects; `include_base64` returns the bytes for `cad_import_model` (up to 20 MB). |
