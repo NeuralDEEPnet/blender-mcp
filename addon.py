@@ -1116,6 +1116,17 @@ class BlenderMCPServer:
             roots = sorted((o for o in imported_objects if o.parent not in imported_objects),
                            key=lambda o: (o.type == 'CAMERA' or o.type == 'LIGHT', not o.children, o.name))
             imported_objects = roots + sorted((o for o in imported_objects if o not in roots), key=lambda o: o.name)
+            # A multi-part assembly (e.g. a 3DJ GLB: one top-level object per part) keeps
+            # its part names: group the parts under a new empty carrying the given name
+            if name and len(roots) > 1:
+                parent = bpy.data.objects.new(name, None)
+                bpy.context.collection.objects.link(parent)
+                for obj in roots:
+                    obj.parent = parent
+                roots = [parent]
+                imported_objects = [parent] + imported_objects
+                parent.select_set(True)
+                name = None
             bpy.context.view_layer.objects.active = roots[0]
             
             # If a name is provided, rename the active object

@@ -1000,7 +1000,8 @@ def import_model_from_url(ctx: Context, url: str, name: str = None, scale: float
 
     Parameters:
     - url: Public HTTPS URL of the model file
-    - name: Optional name for the imported object
+    - name: Optional name for the imported object. A file with several top-level
+      parts keeps its part names and is grouped under an empty with this name.
     - scale: Uniform scale factor. STL has no units, so a CAD part modelled in
       millimetres arrives 1000x too large for Blender's metres: pass 0.001.
     """
