@@ -211,6 +211,10 @@ class BlenderMCPServer:
             "animate_object": lambda **kwargs: self.animate_object(**kwargs),
             "get_correct_tier": lambda **kwargs: self.get_correct_tier(**kwargs),
             "import_file": lambda **kwargs: self.import_file(**kwargs),
+            "import_url": lambda **kwargs: self.import_url(**kwargs),
+            "apply_image_texture": lambda **kwargs: self.apply_image_texture(**kwargs),
+            "render_scene": lambda **kwargs: self.render_scene(**kwargs),
+            "export_file": lambda **kwargs: self.export_file(**kwargs),
         }
 
         handler = handlers.get(cmd_type)
@@ -569,25 +573,206 @@ class BlenderMCPServer:
                 "material": material_name if 'material_name' in locals() else None
             }
     
-    def render_scene(self, output_path=None, resolution_x=None, resolution_y=None):
-        """Render the current scene"""
-        if resolution_x is not None:
-            bpy.context.scene.render.resolution_x = resolution_x
-        
-        if resolution_y is not None:
-            bpy.context.scene.render.resolution_y = resolution_y
-        
-        if output_path:
-            bpy.context.scene.render.filepath = output_path
-        
-        # Render the scene
-        bpy.ops.render.render(write_still=bool(output_path))
-        
+    MODEL_EXTENSIONS = {".glb", ".gltf", ".stl", ".obj", ".fbx"}
+    IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
+    CONTENT_TYPES = {
+        "model/gltf-binary": ".glb", "model/gltf+json": ".gltf", "model/stl": ".stl",
+        "model/obj": ".obj", "image/png": ".png", "image/jpeg": ".jpg", "image/webp": ".webp",
+    }
+
+    def _download(self, url, allowed, max_bytes=200 * 1024 * 1024):
+        """Download an https URL to a temp file on the Blender machine and return its path."""
+        from urllib.parse import urlparse
+        parsed = urlparse(url)
+        if parsed.scheme != "https":
+            raise ValueError("Only https:// URLs are supported")
+        ext = os.path.splitext(parsed.path)[1].lower()
+        with requests.get(url, stream=True, timeout=60) as resp:
+            resp.raise_for_status()
+            if ext not in allowed:
+                ctype = resp.headers.get("Content-Type", "").split(";")[0].strip().lower()
+                ext = self.CONTENT_TYPES.get(ctype, ext)
+            if ext not in allowed:
+                raise ValueError(f"Unsupported or unknown file type '{ext}'. Supported: {sorted(allowed)}")
+            fd, path = tempfile.mkstemp(suffix=ext, prefix="blender_mcp_")
+            size = 0
+            try:
+                with os.fdopen(fd, "wb") as f:
+                    for chunk in resp.iter_content(chunk_size=1 << 20):
+                        size += len(chunk)
+                        if size > max_bytes:
+                            raise ValueError(f"File exceeds {max_bytes // (1024 * 1024)} MB limit")
+                        f.write(chunk)
+            except Exception:
+                os.unlink(path)
+                raise
+        return path
+
+    def import_url(self, url, name=None, scale=1.0):
+        """Download a model from an https URL and import it."""
+        path = self._download(url, self.MODEL_EXTENSIONS)
+        try:
+            result = self.import_file(path, name=name, scale=scale)
+        finally:
+            if os.path.exists(path):
+                os.unlink(path)
+        result.pop("filepath", None)
+        result["source_url"] = url
+        return result
+
+    def apply_image_texture(self, object_name, image_url=None, filepath=None, material_name=None):
+        """Use an image as the Base Color texture of an object's material."""
+        obj = bpy.data.objects.get(object_name)
+        if not obj:
+            raise ValueError(f"Object not found: {object_name}")
+        if obj.type != 'MESH':
+            raise ValueError(f"Object {object_name} is a {obj.type}, not a MESH")
+
+        downloaded = None
+        if image_url:
+            downloaded = filepath = self._download(image_url, self.IMAGE_EXTENSIONS, max_bytes=50 * 1024 * 1024)
+        if not filepath or not os.path.exists(filepath):
+            raise ValueError("Provide image_url or an existing filepath")
+        try:
+            image = bpy.data.images.load(filepath)
+            image.pack()  # keep the pixels in the .blend so the temp file can go
+        finally:
+            if downloaded and os.path.exists(downloaded):
+                os.unlink(downloaded)
+
+        mat = bpy.data.materials.get(material_name) if material_name else None
+        if mat is None:
+            mat = bpy.data.materials.new(name=material_name or f"{object_name}_texture")
+        if hasattr(mat, "use_nodes") and not mat.node_tree:
+            mat.use_nodes = True
+        nodes, links = mat.node_tree.nodes, mat.node_tree.links
+        principled = next((n for n in nodes if n.type == 'BSDF_PRINCIPLED'), None)
+        if principled is None:
+            principled = nodes.new('ShaderNodeBsdfPrincipled')
+            output = next((n for n in nodes if n.type == 'OUTPUT_MATERIAL'), None) or nodes.new('ShaderNodeOutputMaterial')
+            links.new(principled.outputs[0], output.inputs[0])
+
+        tex = nodes.new('ShaderNodeTexImage')
+        tex.image = image
+        tex.location = (principled.location.x - 320, principled.location.y)
+        has_uv = bool(obj.data.uv_layers)
+        if not has_uv:
+            # No UV map (typical for CAD/STL meshes): project the image as a box instead
+            coord = nodes.new('ShaderNodeTexCoord')
+            coord.location = (tex.location.x - 220, tex.location.y)
+            tex.projection = 'BOX'
+            tex.projection_blend = 0.2
+            links.new(coord.outputs['Generated'], tex.inputs['Vector'])
+        links.new(tex.outputs['Color'], principled.inputs['Base Color'])
+
+        if obj.data.materials:
+            obj.data.materials[0] = mat
+        else:
+            obj.data.materials.append(mat)
         return {
-            "rendered": True,
-            "output_path": output_path if output_path else "[not saved]",
-            "resolution": [bpy.context.scene.render.resolution_x, bpy.context.scene.render.resolution_y],
+            "object": object_name,
+            "material": mat.name,
+            "image": image.name,
+            "image_size": [image.size[0], image.size[1]],
+            "mapping": "uv" if has_uv else "box_projection",
         }
+
+    def render_scene(self, output_path=None, resolution_x=None, resolution_y=None,
+                     engine=None, samples=None, return_image=False):
+        """Render the current scene through the active camera"""
+        import base64
+        scene = bpy.context.scene
+        if scene.camera is None:
+            cameras = [o for o in scene.objects if o.type == 'CAMERA']
+            if not cameras:
+                raise ValueError("Scene has no camera. Create one with create_object(type='CAMERA') first.")
+            scene.camera = cameras[0]
+
+        if resolution_x is not None:
+            scene.render.resolution_x = int(resolution_x)
+        if resolution_y is not None:
+            scene.render.resolution_y = int(resolution_y)
+        scene.render.resolution_percentage = 100
+        if engine:
+            scene.render.engine = engine
+        if samples is not None:
+            if scene.render.engine == 'CYCLES':
+                scene.cycles.samples = int(samples)
+            elif hasattr(scene, "eevee") and hasattr(scene.eevee, "taa_render_samples"):
+                scene.eevee.taa_render_samples = int(samples)
+
+        temp_path = None
+        if not output_path:
+            fd, temp_path = tempfile.mkstemp(suffix=".png", prefix="blender_mcp_render_")
+            os.close(fd)
+            output_path = temp_path
+        scene.render.image_settings.file_format = 'PNG'
+        scene.render.filepath = output_path
+        try:
+            bpy.ops.render.render(write_still=True)
+            if not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
+                raise RuntimeError(f"Render produced no image (engine {scene.render.engine})")
+            result = {
+                "rendered": True,
+                "output_path": None if temp_path else output_path,
+                "resolution": [scene.render.resolution_x, scene.render.resolution_y],
+                "engine": scene.render.engine,
+                "camera": scene.camera.name,
+            }
+            if return_image:
+                with open(output_path, "rb") as f:
+                    result["image_base64"] = base64.b64encode(f.read()).decode("ascii")
+            return result
+        finally:
+            if temp_path and os.path.exists(temp_path):
+                os.unlink(temp_path)
+
+    def export_file(self, format="glb", object_names=None, filepath=None, return_base64=False,
+                    max_base64_bytes=20 * 1024 * 1024):
+        """Export the scene, or just the named objects, to GLB / STL / OBJ / FBX."""
+        import base64
+        fmt = format.lower().lstrip(".")
+        if fmt not in {"glb", "stl", "obj", "fbx"}:
+            raise ValueError(f"Unsupported export format: {format}. Supported: glb, stl, obj, fbx")
+
+        selection_only = bool(object_names)
+        if selection_only:
+            missing = [n for n in object_names if n not in bpy.data.objects]
+            if missing:
+                raise ValueError(f"Objects not found: {missing}")
+            for obj in bpy.context.view_layer.objects:
+                obj.select_set(obj.name in object_names)
+            bpy.context.view_layer.objects.active = bpy.data.objects[object_names[0]]
+
+        if not filepath:
+            fd, filepath = tempfile.mkstemp(suffix=f".{fmt}", prefix="blender_mcp_export_")
+            os.close(fd)
+
+        if fmt == "glb":
+            bpy.ops.export_scene.gltf(filepath=filepath, export_format='GLB', use_selection=selection_only)
+        elif fmt == "stl":
+            if hasattr(bpy.ops.wm, "stl_export"):  # Blender 4.1+
+                bpy.ops.wm.stl_export(filepath=filepath, export_selected_objects=selection_only)
+            else:
+                bpy.ops.export_mesh.stl(filepath=filepath, use_selection=selection_only)
+        elif fmt == "obj":
+            if hasattr(bpy.ops.wm, "obj_export"):  # Blender 3.2+
+                bpy.ops.wm.obj_export(filepath=filepath, export_selected_objects=selection_only)
+            else:
+                bpy.ops.export_scene.obj(filepath=filepath, use_selection=selection_only)
+        else:
+            bpy.ops.export_scene.fbx(filepath=filepath, use_selection=selection_only)
+
+        size = os.path.getsize(filepath)
+        result = {"filepath": filepath, "format": fmt, "size_bytes": size,
+                  "objects": list(object_names) if selection_only else "all"}
+        if return_base64:
+            if size > max_base64_bytes:
+                result["base64_skipped"] = f"File is larger than {max_base64_bytes} bytes"
+            else:
+                with open(filepath, "rb") as f:
+                    result["base64"] = base64.b64encode(f.read()).decode("ascii")
+        return result
 
     def ensure_valid_csm_token(self):
         """Check if CSM.ai integration is enabled and an API key is set"""
@@ -867,12 +1052,13 @@ class BlenderMCPServer:
 
         return mesh_obj
 
-    def import_file(self, filepath, name=None):
+    def import_file(self, filepath, name=None, scale=1.0):
         """Import a 3D model file into Blender
         
         Parameters:
         - filepath: Path to the 3D model file
         - name: Optional name for the imported model
+        - scale: Uniform scale applied to the imported root objects
         
         Returns information about the imported model.
         """
@@ -925,9 +1111,12 @@ class BlenderMCPServer:
             for obj in bpy.context.view_layer.objects:
                 obj.select_set(obj in imported_objects)
             
-            # Set the active object to the first imported object
-            if imported_objects:
-                bpy.context.view_layer.objects.active = imported_objects[0]
+            # Make a top-level imported object active, so the name and scale land on the
+            # model's root and not on an arbitrary child
+            roots = sorted((o for o in imported_objects if o.parent not in imported_objects),
+                           key=lambda o: (o.type == 'CAMERA' or o.type == 'LIGHT', not o.children, o.name))
+            imported_objects = roots + sorted((o for o in imported_objects if o not in roots), key=lambda o: o.name)
+            bpy.context.view_layer.objects.active = roots[0]
             
             # If a name is provided, rename the active object
             if name and bpy.context.active_object:
@@ -935,6 +1124,12 @@ class BlenderMCPServer:
                 if bpy.context.active_object.data:
                     bpy.context.active_object.data.name = name
             
+            # Scale the top-level imported objects (children follow their parents)
+            if scale and float(scale) != 1.0:
+                for obj in roots:
+                    obj.scale = [c * float(scale) for c in obj.scale]
+                bpy.context.view_layer.update()
+
             # Compile results
             result = {
                 "imported_objects": [obj.name for obj in imported_objects],

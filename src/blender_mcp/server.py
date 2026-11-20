@@ -229,7 +229,10 @@ def get_blender_connection():
     
     # Create a new connection if needed
     if _blender_connection is None:
-        _blender_connection = BlenderConnection(host="localhost", port=9876)
+        _blender_connection = BlenderConnection(
+            host=os.environ.get("BLENDER_MCP_HOST", "localhost"),
+            port=int(os.environ.get("BLENDER_MCP_PORT", "9876")),
+        )
         if not _blender_connection.connect():
             logger.error("Failed to connect to Blender")
             _blender_connection = None
@@ -865,7 +868,9 @@ def set_material(
             params["color"] = color
             
         result = blender.send_command("set_material", params)
-        return f"Applied material to {object_name}: {result.get('material_name', 'unknown')}"
+        if result.get("status") == "error":
+            return f"Error setting material: {result.get('message', 'unknown error')}"
+        return f"Applied material to {object_name}: {result.get('material', 'unknown')}"
     except Exception as e:
         logger.error(f"Error setting material: {str(e)}")
         return f"Error setting material: {str(e)}"
@@ -969,8 +974,21 @@ def asset_creation_strategy() -> str:
     - The task specifically requires a basic material/color
     """
 
+def _addon_call(command: str, params: Dict[str, Any], what: str) -> Dict[str, Any]:
+    """Send a command to the addon, with a clear message if the installed addon predates it."""
+    try:
+        return get_blender_connection().send_command(command, params)
+    except Exception as e:
+        if "Unknown command type" in str(e):
+            raise Exception(
+                f"The addon running in Blender is too old for {what}. "
+                "Reinstall addon.py from this repository and restart the BlenderMCP server in Blender."
+            )
+        raise
+
+
 @mcp.tool()
-def import_model_from_url(ctx: Context, url: str, name: str = None) -> str:
+def import_model_from_url(ctx: Context, url: str, name: str = None, scale: float = 1.0) -> str:
     """
     Download a 3D model from an HTTPS URL and import it into the Blender scene.
 
@@ -978,45 +996,109 @@ def import_model_from_url(ctx: Context, url: str, name: str = None) -> str:
     (`cad_export_model` with format glb/stl, `get_model_download_url`,
     `generate_from_text` results) or CSM.ai. Supported formats: GLB/GLTF, STL,
     OBJ, FBX. STEP is not importable by Blender - export GLB or STL instead.
+    The download happens on the machine running Blender.
 
     Parameters:
     - url: Public HTTPS URL of the model file
     - name: Optional name for the imported object
+    - scale: Uniform scale factor. STL has no units, so a CAD part modelled in
+      millimetres arrives 1000x too large for Blender's metres: pass 0.001.
     """
-    import tempfile
-    from urllib.parse import urlparse
-
-    max_bytes = 200 * 1024 * 1024
-    allowed = {".glb", ".gltf", ".stl", ".obj", ".fbx"}
     try:
-        parsed = urlparse(url)
-        if parsed.scheme != "https":
+        if not url.lower().startswith("https://"):
             return json.dumps({"status": "error", "message": "Only https:// URLs are supported"}, indent=2)
-        ext = os.path.splitext(parsed.path)[1].lower()
-        with requests.get(url, stream=True, timeout=60) as resp:
-            resp.raise_for_status()
-            if ext not in allowed:
-                ctype = resp.headers.get("Content-Type", "").lower()
-                ext = {"model/gltf-binary": ".glb", "model/stl": ".stl", "model/obj": ".obj"}.get(ctype.split(";")[0], ext)
-            if ext not in allowed:
-                return json.dumps({
-                    "status": "error",
-                    "message": f"Unsupported or unknown file type '{ext}'. Supported: {sorted(allowed)}"
-                }, indent=2)
-            fd, path = tempfile.mkstemp(suffix=ext, prefix="blender_mcp_")
-            size = 0
-            with os.fdopen(fd, "wb") as f:
-                for chunk in resp.iter_content(chunk_size=1 << 20):
-                    size += len(chunk)
-                    if size > max_bytes:
-                        raise ValueError("Model file exceeds 200 MB limit")
-                    f.write(chunk)
-        blender = get_blender_connection()
-        result = blender.send_command("import_file", {"filepath": path, "name": name})
+        result = _addon_call("import_url", {"url": url, "name": name, "scale": scale}, "import_model_from_url")
         return json.dumps(result, indent=2)
     except Exception as e:
         logger.error(f"Error importing model from URL: {str(e)}")
         return json.dumps({"status": "error", "message": f"Error importing model from URL: {str(e)}"}, indent=2)
+
+
+@mcp.tool()
+def apply_image_texture(ctx: Context, object_name: str, image_url: str, material_name: str = None) -> str:
+    """
+    Use an image from an HTTPS URL as the base colour texture of a mesh object.
+
+    Typical source: a SketchMonkey `render_concept` / `get_job` result URL, or
+    any PNG / JPG / WebP link. Meshes without a UV map (CAD and STL imports)
+    get the image box-projected, so no unwrapping is needed.
+
+    Parameters:
+    - object_name: Mesh object to texture
+    - image_url: Public HTTPS URL of the image
+    - material_name: Optional material to reuse or create
+    """
+    try:
+        if not image_url.lower().startswith("https://"):
+            return json.dumps({"status": "error", "message": "Only https:// URLs are supported"}, indent=2)
+        result = _addon_call(
+            "apply_image_texture",
+            {"object_name": object_name, "image_url": image_url, "material_name": material_name},
+            "apply_image_texture",
+        )
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error applying image texture: {str(e)}")
+        return json.dumps({"status": "error", "message": f"Error applying image texture: {str(e)}"}, indent=2)
+
+
+@mcp.tool()
+def render_scene(ctx: Context, resolution_x: int = 1024, resolution_y: int = 768,
+                 engine: str = None, samples: int = None) -> Image:
+    """
+    Render the scene through its active camera and return the picture.
+
+    Use it to check your work visually, or as a reference image for
+    SketchMonkey (`upload_reference_image`, `render_concept`).
+
+    Parameters:
+    - resolution_x, resolution_y: Output size in pixels (max 2048 each)
+    - engine: Optional render engine, e.g. "CYCLES" or "BLENDER_EEVEE". Blender
+      running without a display (headless.py) usually needs "CYCLES".
+    - samples: Optional sample count; lower is faster
+    """
+    import base64
+    params = {
+        "resolution_x": max(16, min(int(resolution_x), 2048)),
+        "resolution_y": max(16, min(int(resolution_y), 2048)),
+        "return_image": True,
+    }
+    if engine:
+        params["engine"] = engine
+    if samples:
+        params["samples"] = samples
+    result = _addon_call("render_scene", params, "render_scene")
+    if "image_base64" not in result:
+        raise Exception(f"Render returned no image: {result}")
+    return Image(data=base64.b64decode(result["image_base64"]), format="png")
+
+
+@mcp.tool()
+def export_model(ctx: Context, format: str = "glb", object_names: List[str] = None,
+                 filepath: str = None, include_base64: bool = False) -> str:
+    """
+    Export the scene, or only the named objects, to a model file.
+
+    Hand the result to other tools: 3DJ `cad_import_model` takes base64 up to
+    20 MB (set include_base64), and the Turntable viewer and slicers take the file.
+
+    Parameters:
+    - format: "glb" (default), "stl", "obj" or "fbx"
+    - object_names: Optional list of objects to export; omit for the whole scene
+    - filepath: Optional output path on the machine running Blender; a temp file if omitted
+    - include_base64: Also return the file contents base64-encoded (files up to 20 MB)
+    """
+    try:
+        params = {"format": format, "return_base64": include_base64}
+        if object_names:
+            params["object_names"] = object_names
+        if filepath:
+            params["filepath"] = filepath
+        result = _addon_call("export_file", params, "export_model")
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error exporting model: {str(e)}")
+        return json.dumps({"status": "error", "message": f"Error exporting model: {str(e)}"}, indent=2)
 
 
 @mcp.tool()

@@ -22,15 +22,41 @@ https://github.com/user-attachments/assets/496c2c69-4779-4569-9be0-80b767702c4c
 ## Compatibility
 
 - Python 3.10+, MCP Python SDK `>=1.3,<3` (both the 1.x `FastMCP` and 2.x `MCPServer` APIs are supported).
+- Blender 3.x to 5.x. Verified end to end on Blender 5.3.
 - Any MCP client that can launch a stdio server (Claude Code / Desktop, Cursor, ...). `.mcp.json` is picked up automatically by Claude Code.
-- Smoke test (no Blender needed, uses a fake addon socket): `python tests/test_e2e.py`
+- `BLENDER_MCP_HOST` / `BLENDER_MCP_PORT` point the MCP server at a Blender on another host or port (default `localhost:9876`).
+
+## Running without the Blender GUI
+
+`headless.py` runs the addon in background Blender, for servers, CI and app back ends:
+
+```bash
+blender --background --python headless.py -- --port 9876     # a Blender install
+pip install bpy && python headless.py --port 9876            # Blender as a Python module
+```
+
+Add `--blend scene.blend` to open a file first. Without a display, render with `engine="CYCLES"`.
 
 ## Using with 3DJ and SketchMonkey
 
-Run the `blender` server alongside the 3DJ and SketchMonkey MCP servers in the same client:
+Run the `blender` server alongside the 3DJ and SketchMonkey MCP servers in the same client.
 
-- **3DJ → Blender**: `cad_export_model` (format `glb` or `stl`), `get_model_download_url`, or a `generate_from_text` result gives an HTTPS link. Pass it to `import_model_from_url`. (STEP is not importable by Blender; export GLB/STL.)
-- **Blender → SketchMonkey/3DJ**: use `compose_design_brief` / `render_concept` for renders, or export from Blender and import into 3DJ via `cad_import_model`.
+| Direction | Tool | What it does |
+| --- | --- | --- |
+| 3DJ → Blender | `import_model_from_url` | Imports a GLB / STL / OBJ / FBX link from `cad_export_model`, `get_model_download_url` or a generation result. STEP is not importable by Blender; export GLB or STL. STL carries no units: pass `scale=0.001` for a part modelled in millimetres. |
+| SketchMonkey → Blender | `apply_image_texture` | Puts an image link (a `render_concept` result, any PNG / JPG / WebP) on a mesh as its base colour. Meshes without UVs, such as CAD imports, get a box projection. |
+| Blender → SketchMonkey | `render_scene` | Renders through the active camera and returns the image, e.g. as a reference for `upload_reference_image` / `render_concept`. |
+| Blender → 3DJ | `export_model` | Writes GLB / STL / OBJ / FBX for the scene or named objects; `include_base64` returns the bytes for `cad_import_model` (up to 20 MB). |
+
+Downloads run on the machine where Blender runs, so a remote Blender works too. After updating this repository, reinstall `addon.py` in Blender: the four tools above need the current addon.
+
+## Tests
+
+```bash
+python tests/test_e2e.py              # protocol smoke test against a fake addon; no Blender needed
+pip install bpy
+python tests/test_real_blender.py     # every non-CSM tool against real headless Blender (--offline skips downloads)
+```
 
 ## Overview
 

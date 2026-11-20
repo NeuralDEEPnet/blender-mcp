@@ -5,6 +5,7 @@ Works with MCP Python SDK 1.x and 2.x.
 """
 import asyncio
 import json
+import os
 import socket
 import sys
 import threading
@@ -12,11 +13,18 @@ import threading
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
-PORT = 9876
+def _free_port():
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+PORT = _free_port()
 EXPECTED_TOOLS = {
     "get_scene_info", "get_object_info", "create_object", "modify_object",
     "delete_object", "animate_object", "set_material", "execute_blender_code",
     "get_csm_status", "search_csm_models", "import_csm_model", "import_model_from_url",
+    "apply_image_texture", "render_scene", "export_model",
 }
 received = []
 
@@ -56,7 +64,10 @@ async def main():
     ready = threading.Event()
     threading.Thread(target=fake_blender, args=(ready,), daemon=True).start()
     ready.wait(5)
-    params = StdioServerParameters(command=sys.executable, args=["-m", "blender_mcp.server"])
+    params = StdioServerParameters(
+        command=sys.executable, args=["-m", "blender_mcp.server"],
+        env=dict(os.environ, BLENDER_MCP_PORT=str(PORT)),
+    )
     async with stdio_client(params) as (r, w):
         async with ClientSession(r, w) as s:
             await s.initialize()
