@@ -101,7 +101,10 @@ async def run(port):
             image = res.content[0]
             data = base64.b64decode(image.data)
             assert image.type == "image" and data[:8] == b"\x89PNG\r\n\x1a\n", "render is not a PNG"
-            print(f"OK: render_scene -> PNG, {len(data)} bytes")
+            res = await call("render_scene", resolution_x=320, resolution_y=240, engine="CYCLES", samples=4, image_format="jpeg")
+            jpeg = base64.b64decode(res.content[0].data)
+            assert jpeg[:3] == b"\xff\xd8\xff" and getattr(res.content[0], "mime_type", getattr(res.content[0], "mimeType", None)) == "image/jpeg", "render is not a JPEG"
+            print(f"OK: render_scene -> PNG {len(data)} bytes, JPEG {len(jpeg)} bytes")
 
             res = await s.call_tool("import_model_from_url", {"url": "http://example.com/a.glb"})
             assert "Only https" in text(res)

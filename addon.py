@@ -678,7 +678,7 @@ class BlenderMCPServer:
         }
 
     def render_scene(self, output_path=None, resolution_x=None, resolution_y=None,
-                     engine=None, samples=None, return_image=False):
+                     engine=None, samples=None, return_image=False, image_format="PNG", quality=90):
         """Render the current scene through the active camera"""
         import base64
         scene = bpy.context.scene
@@ -701,12 +701,15 @@ class BlenderMCPServer:
             elif hasattr(scene, "eevee") and hasattr(scene.eevee, "taa_render_samples"):
                 scene.eevee.taa_render_samples = int(samples)
 
+        image_format = "JPEG" if str(image_format).upper() in ("JPEG", "JPG") else "PNG"
         temp_path = None
         if not output_path:
-            fd, temp_path = tempfile.mkstemp(suffix=".png", prefix="blender_mcp_render_")
+            fd, temp_path = tempfile.mkstemp(suffix=".jpg" if image_format == "JPEG" else ".png", prefix="blender_mcp_render_")
             os.close(fd)
             output_path = temp_path
-        scene.render.image_settings.file_format = 'PNG'
+        scene.render.image_settings.file_format = image_format
+        if image_format == "JPEG":
+            scene.render.image_settings.quality = int(quality)
         scene.render.filepath = output_path
         try:
             bpy.ops.render.render(write_still=True)
@@ -718,6 +721,7 @@ class BlenderMCPServer:
                 "resolution": [scene.render.resolution_x, scene.render.resolution_y],
                 "engine": scene.render.engine,
                 "camera": scene.camera.name,
+                "image_format": image_format,
             }
             if return_image:
                 with open(output_path, "rb") as f:

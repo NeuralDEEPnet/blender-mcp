@@ -1045,7 +1045,8 @@ def apply_image_texture(ctx: Context, object_name: str, image_url: str, material
 
 @mcp.tool()
 def render_scene(ctx: Context, resolution_x: int = 1024, resolution_y: int = 768,
-                 engine: str = None, samples: int = None) -> Image:
+                 engine: str = None, samples: int = None, image_format: str = "png",
+                 quality: int = 90) -> Image:
     """
     Render the scene through its active camera and return the picture.
 
@@ -1057,12 +1058,16 @@ def render_scene(ctx: Context, resolution_x: int = 1024, resolution_y: int = 768
     - engine: Optional render engine, e.g. "CYCLES" or "BLENDER_EEVEE". Blender
       running without a display (headless.py) usually needs "CYCLES".
     - samples: Optional sample count; lower is faster
+    - image_format: "png" (default) or "jpeg"; JPEG is much smaller to pass on
+    - quality: JPEG quality 1-100
     """
     import base64
     params = {
         "resolution_x": max(16, min(int(resolution_x), 2048)),
         "resolution_y": max(16, min(int(resolution_y), 2048)),
         "return_image": True,
+        "image_format": "JPEG" if image_format.lower() in ("jpeg", "jpg") else "PNG",
+        "quality": max(1, min(int(quality), 100)),
     }
     if engine:
         params["engine"] = engine
@@ -1071,7 +1076,8 @@ def render_scene(ctx: Context, resolution_x: int = 1024, resolution_y: int = 768
     result = _addon_call("render_scene", params, "render_scene")
     if "image_base64" not in result:
         raise Exception(f"Render returned no image: {result}")
-    return Image(data=base64.b64decode(result["image_base64"]), format="png")
+    return Image(data=base64.b64decode(result["image_base64"]),
+                 format="jpeg" if result.get("image_format") == "JPEG" else "png")
 
 
 @mcp.tool()
